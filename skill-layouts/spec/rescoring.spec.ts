@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { reparseResults, rescoreResults, summariseResults } from '../src/cli.ts';
+import { finishEvaluation, reparseResults, rescoreResults, summariseResults } from '../src/cli.ts';
 import { freePort, startApiServer, urlsOf } from '../src/api-server.ts';
 import { unreachable } from '../src/outcome.ts';
 import { agentVersionOf, commandDidNotStart, type Config, rescoreNetworkFailures, resultOf, type RunRecord, scoreRun, startRun } from '../src/runs.ts';
@@ -186,6 +186,26 @@ describe('rescoring and summarising', () => {
         expect(readFileSync(resultFile(), 'utf8')).toBe(before);
     });
 
+    describe('at the end of an evaluation', () => {
+
+        beforeEach(() => {
+            writeFileSync(join(results, 'conditions.json'), JSON.stringify({ shared: { apiServer: evaluation.apiServer }, agents: {} }));
+            writeFileSync(resultFile(), JSON.stringify({ ...networkFailure, outcome: 'correct' }, null, 2));
+        });
+
+        it('summarises the runs of an evaluation given --unsandboxed, where sandbox-exec is not available', async () => {
+            await finishEvaluation(results, work, [ run ], { agents: [ 'kiro' ], sandbox: { problems: [], checks: { unsandboxed: true } }, config: evaluation });
+
+            expect(JSON.parse(readFileSync(join(results, 'summary.json'), 'utf8'))).toMatchObject({ runs: 1, planned: 1 });
+            expect(existsSync(join(results, 'review', 'scores.json'))).toBe(true);
+        });
+
+        it('refuses to rescore, with what refuses the checks, where sandbox-exec is not available and it is not given --unsandboxed', async () => {
+            await expect(finishEvaluation(results, work, [ run ], { agents: [ 'kiro' ], sandbox: { problems: [ "sandbox-exec can't start here" ], checks: { unsandboxed: false } }, config: evaluation }))
+                .rejects.toThrow("nothing rescored: sandbox-exec can't start here");
+        });
+    });
+
     it('--rescore refuses results made before the local API server, says why, and changes no result.json', async () => {
         // conditions.json as the second pilot left it, with the public APIs
         writeFileSync(join(results, 'conditions.json'), JSON.stringify({ shared: { template: { commit: 'abc' }, requests: 'sha256:aaaa' }, agents: {} }));
@@ -222,6 +242,19 @@ describe('rescoring and summarising', () => {
         });
 
         expect(leftovers).toEqual([ false, false ]);
+    });
+
+    it("records in result.json whether the rescore's tsc and npm test ran under sandbox-exec", async () => {
+        const bin = join(root, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'npx'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+        await rescoreNetworkFailures([ run ], new Map([ [ request.id, request ] ]), results, work, evaluation, {
+            checks: { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true },
+        });
+
+        expect(JSON.parse(readFileSync(resultFile(), 'utf8'))).toMatchObject({ outcome: 'correct', checksSandboxed: false });
     });
 
     it("stops the rescore, and changes nothing, when a command couldn't start", async () => {
@@ -297,9 +330,11 @@ describe('scoreRun', () => {
             writeFileSync(join(leftover, 'job-1'), '7');
         }
 
-        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(record.outcome).toBe('correct');
+        // given --unsandboxed, where sandbox-exec isn't available
+        expect(JSON.parse(readFileSync(join(results, 'result.json'), 'utf8')).checksSandboxed).toBe(false);
     });
 
     describe('when the agent failed', () => {
@@ -309,7 +344,7 @@ describe('scoreRun', () => {
             mkdirSync(bin);
             writeFileSync(join(bin, 'npx'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
             writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-            return { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' as const };
+            return { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true };
         };
         const server = { urls: urlsOf(4567), requests: () => [], output: () => '' };
 
@@ -343,7 +378,7 @@ describe('scoreRun', () => {
         writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
         writeFileSync(join(results, 'stream.jsonl'), readFileSync(join(import.meta.dirname, 'fixtures', 'copilot-cli.synthetic.jsonl')));
 
-        const record = await scoreRun({ ...run, agent: 'copilot' }, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, { ...config, models: { ...config.models, copilot: 'auto' } }, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun({ ...run, agent: 'copilot' }, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, { ...config, models: { ...config.models, copilot: 'auto' } }, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(record).toMatchObject({ models: [ 'claude-opus-5.5', 'gpt-5.4' ], modelAnswered: true, modelUnreported: false });
         expect(JSON.parse(readFileSync(join(results, 'result.json'), 'utf8'))).toMatchObject({ models: [ 'claude-opus-5.5', 'gpt-5.4' ] });
@@ -356,7 +391,7 @@ describe('scoreRun', () => {
         writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
         writeFileSync(join(results, 'stream.jsonl'), readFileSync(join(import.meta.dirname, 'fixtures', 'copilot-cli.smoke-e3c01675.jsonl')));
 
-        const record = await scoreRun({ ...run, agent: 'copilot' }, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, { ...config, models: { ...config.models, copilot: 'auto' } }, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun({ ...run, agent: 'copilot' }, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, { ...config, models: { ...config.models, copilot: 'auto' } }, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(JSON.parse(readFileSync(join(results, 'result.json'), 'utf8'))).toMatchObject({
             models: [ 'gpt-6-luna' ], modelUnreported: false, tokensReported: false, premiumRequests: 1, totalNanoAiu: 523_059_500,
@@ -373,7 +408,7 @@ describe('scoreRun', () => {
         const reply = { type: 'sessionUpdate', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Added the scenario. Suggestions: replace PostAndCheck.' } } } };
         writeFileSync(join(results, 'stream.jsonl'), `${ readFileSync(join(results, 'stream.jsonl'), 'utf8').trimEnd() }\n${ JSON.stringify(reply) }\n`);
 
-        await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(readFileSync(join(results, 'reply.md'), 'utf8')).toBe('Added the scenario. Suggestions: replace PostAndCheck.\n');
     });
@@ -387,7 +422,7 @@ describe('scoreRun', () => {
         // request 1 exercises actor-names, but not names-without-the, which still applies to CheckTheResult
         writeFileSync(join(directory, 'spec', 'units.spec.ts'), "const CheckTheResult = () => Task.where(the`#actor checks the result`)\nactorCalled('Apisitt').attemptsTo(CheckTheResult())\n");
 
-        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(Object.fromEntries(record.checks.filter(check => [ 'actor-names', 'names-without-the' ].includes(check.item)).map(check => [ check.item, check.verdict ])))
             .toEqual({ 'actor-names': 'fail', 'names-without-the': 'fail' });
@@ -405,7 +440,7 @@ describe('scoreRun', () => {
         // the run adds a spec of its own, with a Role enum of its own, next to the project's 'Apisitt'
         writeFileSync(join(directory, 'spec', 'units.spec.ts'), "enum Role { Analyst = 'Apisitt, the analyst' }\nit('converts', () => actorCalled(Role.Analyst).attemptsTo(Convert('5 inch to cm')))\n");
 
-        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(record.checks.find(check => check.item === 'consistent-actor-names')).toMatchObject({ verdict: 'fail', evidence: [ 'spec/units.spec.ts:2: actorCalled(Role.Analyst)' ] });
     });
@@ -416,7 +451,7 @@ describe('scoreRun', () => {
         writeFileSync(join(bin, 'npx'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
         writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 
-        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false, agentVersion: 'kiro-cli 3.3.0' }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' });
+        const record = await scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false, agentVersion: 'kiro-cli 3.3.0' }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true });
 
         expect(record.agentVersion).toBe('kiro-cli 3.3.0');
     });
@@ -428,7 +463,7 @@ describe('scoreRun', () => {
     });
 
     it("stops scoring, with the reason, and saves no result.json, when npx can't start, rather than scoring the run as incorrect", async () => {
-        await expect(scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: '/nonexistent' }, platform: 'linux' }))
+        await expect(scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, { urls: urlsOf(4567), requests: () => [], output: () => '' }, { env: { PATH: '/nonexistent' }, unsandboxed: true }))
             .rejects.toThrow(/couldn't start npx: .*ENOENT/);
         expect(existsSync(join(results, 'result.json'))).toBe(false);
     });
@@ -442,7 +477,7 @@ describe('scoreRun', () => {
         const server = await startApiServer({ port: await freePort(), log: join(results, 'server.jsonl') });
         await server.stop();
 
-        await expect(scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, server, { env: { PATH: `${ bin }:/usr/bin:/bin` }, platform: 'linux' }))
+        await expect(scoreRun(run, request, directory, results, { exitCode: 0, durationMs: 1, timedOut: false }, config, server, { env: { PATH: `${ bin }:/usr/bin:/bin` }, unsandboxed: true }))
             .rejects.toThrow(/^run 3f9c2a1e: the local API server didn't answer http:\/\/127\.0\.0\.1:\d+\/v4\/\?expr=1, which is the harness's failure, not the run's\.\nIts output:\n[\s\S]*listening on \d+[\s\S]*Its last requests:/);
         expect(existsSync(join(results, 'result.json'))).toBe(false);
     });
@@ -452,7 +487,7 @@ describe('resultOf under sandbox-exec', () => {
     it('says whether the command ran under sandbox-exec', () => {
         const directory = mkdtempSync(join(tmpdir(), 'skill-layouts-sandboxed-'));
         try {
-            expect(resultOf('true', [], directory, join(directory, 'log'), 1, { platform: 'linux' }).sandboxed).toBe(false);
+            expect(resultOf('true', [], directory, join(directory, 'log'), 1, { unsandboxed: true }).sandboxed).toBe(false);
         }
         finally {
             rmSync(directory, { recursive: true, force: true });
@@ -477,7 +512,7 @@ describe('resultOf', () => {
     afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
     it("scores a command that runs past its timeout without printing anything as failed, rather than as one that couldn't start", () => {
-        const result = resultOf('sleep', [ '5' ], directory, join(directory, 'sleep.log'), 0.005, { platform: 'linux' });
+        const result = resultOf('sleep', [ '5' ], directory, join(directory, 'sleep.log'), 0.005, { unsandboxed: true });
 
         expect(result.exitCode).not.toBe(0);
         expect(result.log).toMatch(/timed out after 0\.3 s/);
@@ -485,7 +520,7 @@ describe('resultOf', () => {
     });
 
     it("still stops on a command that couldn't start", () => {
-        expect(() => resultOf('no-such-command', [], directory, join(directory, 'log'), 1, { platform: 'linux' }))
+        expect(() => resultOf('no-such-command', [], directory, join(directory, 'log'), 1, { unsandboxed: true }))
             .toThrow(/couldn't start no-such-command: .*ENOENT/);
     });
 });
