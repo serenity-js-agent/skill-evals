@@ -33,9 +33,15 @@ export class MemoryFilesystem implements Filesystem {
         return this.files.has(path) || this.directories.has(path) || [ ...this.files.keys() ].some(file => file.startsWith(`${ path }/`));
     }
 
+    /** Copies `from`'s files and directories, empty ones included, as nodeFilesystem's copy does */
     copy(from: string, to: string, include: (path: string) => boolean = () => true): void {
-        for (const [ file, content ] of [ ...this.files ].filter(([ file ]) => file.startsWith(`${ from }/`) && include(file))) {
-            this.files.set(`${ to }${ file.slice(from.length) }`, content);
+        const isIn = (path: string) => (path === from || path.startsWith(`${ from }/`)) && include(path);
+        const copied = (path: string) => `${ to }${ path.slice(from.length) }`;
+        for (const directory of [ ...this.directories ].filter(isIn)) {
+            this.directories.add(copied(directory));
+        }
+        for (const [ file, content ] of [ ...this.files ].filter(([ file ]) => isIn(file))) {
+            this.files.set(copied(file), content);
         }
     }
 

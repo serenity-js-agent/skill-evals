@@ -64,6 +64,33 @@ describe('the filesystem', () => {
         });
     });
 
+    describe.each([
+        [ 'as Node.js has it', () => ({ filesystem: nodeFilesystem(), root: mkdtempSync(join(tmpdir(), 'skill-layouts-filesystem-')) }) ],
+        [ 'in memory', () => ({ filesystem: new MemoryFilesystem(), root: '/root' }) ],
+    ])('%s, as the other has it', (_, made) => {
+
+        let filesystem: ReturnType<typeof made>['filesystem'];
+        let root: string;
+
+        beforeEach(() => {
+            ({ filesystem, root } = made());
+        });
+        afterEach(() => filesystem.remove(root));
+
+        it('copies a directory with its empty directories, and an empty directory too', () => {
+            filesystem.makeDirectory(join(root, 'from', 'empty'));
+            filesystem.writeFile(join(root, 'from', 'kept.txt'), 'kept');
+            filesystem.makeDirectory(join(root, 'nothing'));
+
+            filesystem.copy(join(root, 'from'), join(root, 'to'));
+            filesystem.copy(join(root, 'nothing'), join(root, 'also-nothing'));
+
+            expect(filesystem.exists(join(root, 'to', 'empty'))).toBe(true);
+            expect(filesystem.readFile(join(root, 'to', 'kept.txt'))).toBe('kept');
+            expect(filesystem.exists(join(root, 'also-nothing'))).toBe(true);
+        });
+    });
+
     describe('in memory, for the session store and the calibration\'s files', () => {
 
         const key = { round: 'focus', run: 'aaaaaaaa', repeat: 1 };
