@@ -13,7 +13,8 @@ import { addedLinesOf, withLocalApi } from './project.ts';
 import { readConfig } from './records.ts';
 import { Results, type RunFiles, runFiles, writeJson } from './results.ts';
 import { promptFor, type Request, type Requests } from './requests.ts';
-import { type Agent, AGENTS, type PlannedRun, reviewPacket, type RunKey } from './review.ts';
+import { harnessSkillDirectories } from './harness-skills.ts';
+import { type Agent, AGENTS, type Blinding, type PlannedRun, reviewPacket, type RunKey } from './review.ts';
 import { checksSandboxFor, SANDBOX_EXEC, sandboxPathsOf } from './sandbox.ts';
 import type { AutoMode, SkillRead, Tokens } from './streams.ts';
 import { Work } from './work.ts';
@@ -274,8 +275,19 @@ export function checksOf(directory: string, diff: string): Check[] {
 }
 
 // what the harness installed, or the tests wrote, rather than what the agent changed; skills-lock.json and the skill
-// directories would give the layout away to the reviewer
-const NOT_THE_AGENTS_CHANGES = [ 'node_modules/', '.agents/', '.claude/', '.kiro/', '.github/skills/', 'skills-lock.json', 'package-lock.json', 'reports/', 'target/', `${ JOBS_DIRECTORY }/`, `${ RESULTS_DIRECTORY }/` ];
+// directories would give the layout away to the reviewer. As the adapters declare them, they're the agents' own
+// directories, such as .kiro, whole, and the skill directories the agents read outside them, such as .github/skills
+const AGENT_DIRECTORIES = AGENTS.flatMap(agent => adapterOf(agent).skills.agentDirectories);
+const NOT_THE_AGENTS_CHANGES = [
+    'node_modules/',
+    ...new Set([
+        ...AGENT_DIRECTORIES.map(directory => `${ directory }/`),
+        ...AGENTS.flatMap(agent => adapterOf(agent).skills.reads)
+            .filter(read => ! AGENT_DIRECTORIES.some(directory => read.startsWith(`${ directory }/`)))
+            .map(read => `${ read }/`),
+    ]),
+    'skills-lock.json', 'package-lock.json', 'reports/', 'target/', `${ JOBS_DIRECTORY }/`, `${ RESULTS_DIRECTORY }/`,
+];
 
 /** Points the test script in a run's package.json at a local API server, keeping the file's formatting. */
 export function pointAtLocalApi(directory: string, urls: ApiServerUrls): void {
@@ -491,7 +503,7 @@ export async function scoreRun(run: PlannedRun, request: Request, directory: str
 
     // the stream first: a format the parser doesn't recognise, or another model, stops the evaluation before anything else
     const stream = readFileSync(files.stream, 'utf8');
-    const trace = adapterOf(run.agent).parseStream(stream, { timedOut: performed.timedOut });
+    const trace = adapterOf(run.agent).parseStream(stream, { timedOut: performed.timedOut, skills: harnessSkillDirectories() });
     const model = modelProblem(config.models[run.agent], trace.models);
     if (model.stop) {
         throw new Error(`run ${ run.id }: ${ model.stop }`);
@@ -544,7 +556,7 @@ export async function scoreRun(run: PlannedRun, request: Request, directory: str
  * reports a model other than the pin, which would have stopped the run.
  */
 export function reparseRecord(run: PlannedRun, request: Request, record: RunRecord, stream: string, config: Config): { record: RunRecord, problem: string | undefined } {
-    const trace = adapterOf(run.agent).parseStream(stream, { timedOut: record.timedOut });
+    const trace = adapterOf(run.agent).parseStream(stream, { timedOut: record.timedOut, skills: harnessSkillDirectories() });
     const model = modelProblem(config.models[run.agent], trace.models);
     const { model: _legacy, ...current } = record;
     return {
@@ -570,13 +582,13 @@ export function reparseRecord(run: PlannedRun, request: Request, record: RunReco
     };
 }
 
-/** The run's review packet, from its diff, which it has to have, and its reply, where it has one. */
-export function writeReviewPacket(run: PlannedRun, request: Request, results: Results): void {
+/** The run's review packet, from its diff, which it has to have, and its reply, where it has one, blinded. */
+export function writeReviewPacket(run: PlannedRun, request: Request, results: Results, blinding: Blinding): void {
     const files = results.run(run.id);
     mkdirSync(results.review, { recursive: true });
     writeFileSync(results.reviewPacket(run.id), reviewPacket({
         id: run.id, request: request.id, prompt: request.prompt,
         diff: readFileSync(files.diff, 'utf8'),
         reply: files.read('reply')?.trim() ?? '',
-    }));
+    }, blinding));
 }

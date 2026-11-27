@@ -51,8 +51,9 @@ export const copilot: AgentAdapter<'copilot'> = {
             ? [ `Copilot reads personal skills from ${ personal }, which COPILOT_HOME doesn't cover: move it aside for the evaluation` ]
             : [];
     },
-    parseStream: (stream, { timedOut }) => parseCopilotStream(stream, { timedOut }),
-    // Copilot reads project skills from .github/skills, .agents/skills and .claude/skills; npx skills links .agents/skills
-    skills: { cliAgent: 'github-copilot', directory: '.agents/skills' },
+    parseStream: (stream, { timedOut, skills }) => parseCopilotStream(stream, { timedOut, skills }),
+    // Copilot reads project skills from .github/skills, .agents/skills and .claude/skills; npx skills links .agents/skills.
+    // .agents and .claude hold agents' configuration, not the project's, while .github holds the project's own workflows
+    skills: { reads: [ '.github/skills', '.agents/skills', '.claude/skills' ], cliAgent: 'github-copilot', directory: '.agents/skills', agentDirectories: [ '.agents', '.claude' ] },
     usageProblem: ({ premiumRequests }) => premiumRequests === undefined ? 'no premium requests recorded' : undefined,
 };
