@@ -920,6 +920,13 @@ These are to be fixed in the next pull requests, each with a failing spec first:
 - **The checks are only sandboxed on macOS.** On Linux, `tsc` and `npm test` only run given `--unsandboxed`, with your
   access to your files and the network. Linux needs a backend of its own, such as bubblewrap, as another
   `ChecksSandbox` in `sandbox.ts`, whose specs CI's Linux job would run
+- **`spec/child-processes.spec.ts`'s specs of a daemon and its output fail now and then when the machine is busy,**
+  as they did in the runs of #19 and of #20, and pass when run again. "collects what it prints, says which output
+  printed each chunk, and stops it", under `startDaemon`, expects each of the daemon's writes to arrive as a chunk of
+  its own. A pipe doesn't promise that: on a busy machine, a chunk can hold a write and whatever else the process
+  printed to the same stream, such as Node.js's own warnings. Started 60 at once, 27 of the daemons delivered
+  `warning` and other output on stderr in one chunk. The spec should compare each stream's output joined, not the
+  chunks
 
 ## Developing the harness
 
