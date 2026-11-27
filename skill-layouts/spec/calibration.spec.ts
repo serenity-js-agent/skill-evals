@@ -418,7 +418,8 @@ describe('calibrating the judge', () => {
             expect(strict.decide({ heldOut: Share.of(18, 20), heldOutFailsCaught: Share.of(4, 4), heldOutPassesKept: Share.of(4, 4) }).why).toContain('the reviewer passed it in 4 held-out verdicts, fewer than 5');
             expect(strict.decide({ heldOut: Share.of(18, 20), heldOutFailsCaught: Share.of(2, 4), heldOutPassesKept: passes }).why).toBe('fails 2 of 4 (50%) of the held-out runs the reviewer failed, under three quarters');
             expect(renderCalibration(reportOf([]), strict)).toContain('Each run is judged by 5 sessions');
-            expect(renderCalibration(reportOf([]), strict)).toContain('at least 90% of at least 20 held-out verdicts, and, where the reviewer failed it in at least 4 held-out verdicts, fails at least three quarters of those runs too.');
+            expect(renderCalibration(reportOf([]), strict)).toContain('An item is calibrated when the judge agrees with at least 90% of at least 20 held-out verdicts, among which the reviewer failed it at least 4 times and passed it at least 5 times, and the judge fails at least three quarters of the runs the reviewer failed.');
+            expect(renderCalibration(reportOf([]), strict)).toContain('With fewer than 4 held-out fails, an item is calibrated against false alarms only; with fewer than 5 held-out passes, against misses only.');
         });
 
         it("decides from the held-out fails only, so failures the guide cites can't calibrate an item, and keeps every run's count in the report", () => {
@@ -435,7 +436,7 @@ describe('calibrating the judge', () => {
                 heldOutFailsCaught: Share.of(0, 1),
                 status: 'calibrated against false alarms only',
             });
-            expect(renderCalibration(report, protocol)).toContain('| 2 of 3 (67%) | 0 of 1 (0%) |');
+            expect(renderCalibration(report, protocol)).toContain('| 2 of 3 (67%) | 0 of 1 (0%) | 10 of 10 (100%) |');
         });
 
         it('reports each round, and every disagreement with the sessions\' reasons', () => {
@@ -452,7 +453,8 @@ describe('calibrating the judge', () => {
             expect(report.disagreements).toEqual([ { round: 'focus', run: 'aaaaaaaa', item: 'structure', reviewer: 'fail', judge: 'pass', heldOut: true, reasons: [ "pass: it's pass", "pass: it's pass", "fail: it's fail" ] } ]);
 
             const markdown = renderCalibration(report, protocol);
-            expect(markdown).toContain('| structure | 1 / 1 / 0 | 1 of 2 (50%) | 0 of 1 (0%) | 0 of 1 (0%) | 0 of 1 (0%) | 1 of 2 (50%) | too few held-out verdicts: 1 held-out verdict, of the 10 it needs |');
+            expect(markdown).toContain('| Item | Reviewer: pass / fail / n/a | Agreement | Held out | Reviewer\'s fails caught | Held-out fails caught | Held-out passes kept | Sessions unanimous | Status |');
+            expect(markdown).toContain('| structure | 1 / 1 / 0 | 1 of 2 (50%) | 0 of 1 (0%) | 0 of 1 (0%) | 0 of 1 (0%) | 0 of 0 (n/a) | 1 of 2 (50%) | too few held-out verdicts: 1 held-out verdict, of the 10 it needs |');
             expect(markdown).toContain('| regression | 1 of 1 (100%) | 0 of 0 (n/a) |');
             expect(markdown).toContain('### structure\n\n- **focus aaaaaaaa**: the reviewer says fail, the judge pass\n  - pass: it\'s pass\n');
             expect(markdown).toContain('6 sessions, 2 of them retried, 1 left no verdicts the harness could use. They used 4.5 credits, and took 6 minutes.');

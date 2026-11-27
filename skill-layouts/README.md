@@ -386,8 +386,8 @@ It was decided before the judge scored anything:
 The report goes in `<out>/calibration/calibration.md`, with everything it's made from in `calibration.json`:
 
 - per item: the reviewer's verdicts, the agreement on every verdict and on the held-out ones, the reviewer's fails the
-  judge caught, in every run and in the held-out ones, how often the sessions were unanimous, and the decision, with
-  its reason
+  judge caught, in every run and in the held-out ones, the reviewer's held-out passes the judge kept, how often the
+  sessions were unanimous, and the decision, with its reason
 - per round, the agreement
 - where the judge differs: the reviewer's pass and the judge's fail, the other way round, n/a on either side, splits,
   and sessions without verdicts
