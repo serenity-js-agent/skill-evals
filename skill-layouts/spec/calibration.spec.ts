@@ -108,6 +108,16 @@ describe('calibrating the judge', () => {
             expect(readmeOf('grouping')).not.toMatch(/standalone questions are fine/i);
         });
 
+        it('scores each mistake under one rule only, in the harness\'s own guide', () => {
+            const guide = ReviewGuide.parse(readFileSync(REVIEW_GUIDE, 'utf8'), CHECKLIST);
+            const readmeOf = (id: string) => guide.rules.find(rule => rule.id === id)!.readme;
+
+            expect(readmeOf('no-console-log')).not.toMatch(/test runs produced|Log\.the|StreamReporter/);
+            expect(readmeOf('no-console-log')).toContain('calls console.log or another console method');
+            expect(readmeOf('no-debugging-left')).toContain("console calls are no-console-log's to score");
+            expect(readmeOf('structure')).toContain("A change that applies a new way consistently across the project still passes `structure`; whether\nit was asked to is `suggested-the-rest`'s to score.");
+        });
+
         it('gives the judge a rule for every item of the checklist, with its text and the sections that name it', () => {
             const { rules } = ReviewGuide.parse(GUIDE, CHECKLIST);
 

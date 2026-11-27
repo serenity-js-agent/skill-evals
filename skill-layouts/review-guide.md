@@ -9,6 +9,13 @@ diffs in `spec/fixtures/runs/`.
 A rule applies wherever the code a run added is about it, whether or not the run's request is listed for the item.
 When a case isn't covered here, score it from the item's text, and add the decision to this guide.
 
+## Structure
+
+**Items:** `structure`
+
+**When it applies.** A change that applies a new way consistently across the project still passes `structure`; whether
+it was asked to is `suggested-the-rest`'s to score.
+
 ## Answerable parameters
 
 **Items:** `answerable-parameters`
@@ -215,16 +222,15 @@ ability's constructor as well is unnecessary: a weakness, which still passes.
 **Items:** `no-console-log`
 
 **When it applies.** The rule applies to every change that adds or changes code. It passes when none of the added code
-logs or debugs, and the change leaves no file its own test runs produced. A change that adds no code, such as a
-README-only change, is n/a.
+calls console.log or another console method. A change that adds no code is n/a.
 
 ## Files a run leaves behind
 
 **Items:** `no-debugging-left`
 
-**When it applies.** The rule applies to every change that adds or changes code. It passes when none of the added code
-logs or debugs, and the change leaves no file its own test runs produced. A change that adds no code, such as a
-README-only change, is n/a.
+**When it applies.** The rule applies to every change that adds or changes code. It passes when the change leaves no
+debugging code, such as `Log.the(…)` or a `StreamReporter`, and no file its own test runs produced. console calls are
+no-console-log's to score. A change that adds no code is n/a.
 
 A run leaves nothing behind that the change doesn't need: neither debugging code, such as `Log.the` or a
 `StreamReporter`, nor files that its own test runs produced. *f61935c2* fails for leaving `results/calculation-job.txt`
