@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { Writable } from 'node:stream';
 import { join } from 'node:path';
@@ -132,7 +132,28 @@ describe('parseArguments', () => {
             agent: undefined,
             checkReferencesOnly: false,
             unsandboxed: false,
+            calibrateOnly: false,
+            rounds: [],
         });
+    });
+
+    it("takes --calibrate with the rounds it judges, without the serenity-js clone, since it runs no evaluation", () => {
+        expect(parseArguments([ '--calibrate', '--rounds', 'focus/pilot,/rounds/regression/pilot', '--template', '/t', ...out ], '/cwd')).toMatchObject({
+            calibrateOnly: true,
+            rounds: [ '/cwd/focus/pilot', '/rounds/regression/pilot' ],
+            template: '/t',
+            out: '/out',
+        });
+    });
+
+    it.each([
+        [ 'without its rounds', [ '--calibrate' ] ],
+        [ 'rounds without --calibrate', [ '--rounds', 'focus/pilot', '--serenity-js', '/s' ] ],
+        [ 'with a mode', [ '--calibrate', '--rounds', 'focus/pilot', '--pilot' ] ],
+        [ 'with an agent', [ '--calibrate', '--rounds', 'focus/pilot', '--agent', 'kiro' ] ],
+        [ 'with another action', [ '--calibrate', '--rounds', 'focus/pilot', '--summarise' ] ],
+    ])('refuses --calibrate %s', (_, argv) => {
+        expect(() => parseArguments([ ...argv, ...out ], '/cwd')).toThrow(/usage|--calibrate and --rounds/);
     });
 
     it("takes --unsandboxed, for the checks where sandbox-exec isn't available, also with --check-references or --rescore", () => {
@@ -232,16 +253,6 @@ describe('spawnWithTimeout', () => {
     });
     afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
-    const isRunning = (pid: number) => {
-        try {
-            process.kill(pid, 0);
-            return true;
-        }
-        catch {
-            return false;
-        }
-    };
-
     const run = (script: string, timeoutMs: number) => spawnWithTimeout('sh', [ '-c', script ], {
         cwd: directory, env: process.env, stdout: join(directory, 'stdout'), stderr: join(directory, 'stderr'), timeoutMs,
     });
@@ -297,11 +308,19 @@ describe('spawnWithTimeout', () => {
     });
 
     it('stops the agent, and every process it started, when it runs out of time, and says it timed out', async () => {
-        const result = await run('sleep 60 & echo $! > child.pid; wait', 500);
+        // the agent's child holds the write end of a FIFO, and nothing else does, so the reader's end of it comes exactly
+        // when the child exits, however long its new parent takes to reap it. A child the harness doesn't stop would
+        // hold it for 60 seconds, and fail the spec on vitest's timeout instead
+        const fifo = join(directory, 'held');
+        execFileSync('mkfifo', [ fifo ]);
+        const childExited = new Promise<void>((resolve, reject) => {
+            createReadStream(fifo).on('error', reject).on('end', resolve).resume();
+        });
+
+        const result = await run(`sleep 60 3> '${ fifo }' & wait`, 500);
+        await childExited;
 
         expect(result.timedOut).toBe(true);
-        expect(existsSync(join(directory, 'child.pid'))).toBe(true);
-        expect(isRunning(Number(readFileSync(join(directory, 'child.pid'), 'utf8')))).toBe(false);
     });
 });
 
@@ -409,7 +428,7 @@ describe('agentsToRun', () => {
 
 describe('preflightProblems', () => {
 
-    const config = { models: { kiro: 'claude-sonnet-5.5', copilot: '' }, template: { commit: 'abc' }, apiServer: { port: 4170 }, runTimeoutMinutes: 1, testTimeoutMinutes: 1 };
+    const config = { models: { kiro: 'claude-sonnet-5.5', copilot: '' }, template: { commit: 'abc' }, apiServer: { port: 4170 }, judge: { agent: 'kiro' as const, model: 'claude-sonnet-5.5' }, runTimeoutMinutes: 1, testTimeoutMinutes: 1 };
 
     it("lets a Kiro-only pilot start without Copilot's pin, token or CLI, and checks only Kiro's", () => {
         expect(preflightProblems([ 'kiro' ], config, { KIRO_API_KEY: 'key' }, { home: '/nowhere', sandboxProblems: () => [] })).toEqual([]);

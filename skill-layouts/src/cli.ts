@@ -2,25 +2,33 @@
 //                                  [--agent <kiro|copilot>] [--prepare-only | --summarise | --compare | --rescore | --reparse | --rescore-checks]
 //                                  --serenity-js <clone> --out <dir> [--template <dir>] [--work <dir>] [--unsandboxed]
 // pnpm run eval:skill-layouts -- --check-references --serenity-js <clone> --out <dir> [--template <dir>] [--work <dir>] [--unsandboxed]
+// pnpm run eval:skill-layouts -- --calibrate --rounds <dir>,<dir> --template <dir> --out <dir> [--work <dir>]
 //
 // Evaluates how a package's skills should be laid out: packs the Serenity/JS packages, gives them each layout's
 // skills, installs them into copies of the Mocha template, runs Kiro and GitHub Copilot on each request, and scores the
 // runs. See the README next to this directory's src/.
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-import { adapterOf, versionOf } from './agents/index.ts';
+import { adapterOf, prepareAgentHomes, versionOf } from './agents/index.ts';
 import { ensurePortFree, withApiServer } from './api-server.ts';
-import { run } from './child-processes.ts';
+import { run, runBuffer, spawnWithTimeout } from './child-processes.ts';
 import { type AgentConditions, checkConditions, fixtureHashes, hashOf, lockfileHashes, recordAgentConditions, recordLockfiles } from './conditions.ts';
-import { type Check, CHECKLIST, conventionsScore } from './conventions.ts';
+import { type Check, CHECKLIST, type ChecklistItem, conventionsScore, exercises } from './conventions.ts';
+import { Calibration, CalibrationFiles } from './judging/calibration.ts';
+import { Judge, JudgePrompt, type Spawn } from './judging/judge.ts';
+import { CalibrationProtocol } from './judging/protocol.ts';
+import { ReviewGuide } from './judging/review-guide.ts';
+import { JudgeIdentity } from './judging/session-store.ts';
+import { FixtureHistory, ProjectBuilder } from './judging/starting-project.ts';
 import { evalRoot, isLayout, type Layout, LAYOUTS } from './layouts.ts';
 import { checkExamples, checkTemplateCommit, layoutTarballs, packPackages, prepareProject } from './project.ts';
 import { compareResults } from './compare.ts';
 import { checkReference, type ReferenceCheck, renderReferenceCheck } from './references.ts';
 import { loadRequests, type Request } from './requests.ts';
-import { type Agent, AGENTS, combineVerdicts, disagreements, type PlannedRun, planRuns, type RunKey, scoresTemplate } from './review.ts';
+import { type Agent, AGENTS, combineVerdicts, disagreements, type PlannedRun, planRuns, REVIEW_GUIDE, type RunKey, scoresTemplate } from './review.ts';
 import { Results } from './results.ts';
 import { renderSmoke, SMOKE_REQUEST, smokeChecks, smokeProblem } from './smoke.ts';
 import { type CheckOptions, checksOf, type Config, loadConfig, type Mode, modelsOf, performRun, agentsToRun, preflightProblems, rebuildWorkingCopy, reparseRecord, rescoreNetworkFailures, resultOf, runsFor, scoreRun, startRun, writeReviewPacket } from './runs.ts';
@@ -53,20 +61,25 @@ export interface Arguments {
     checkReferencesOnly: boolean;
     /** Run tsc and npm test without a sandbox where sandbox-exec isn't available, rather than refuse to */
     unsandboxed: boolean;
+    /** Only judge the runs the reviewer scored in the rounds, and compare the judge's verdicts with theirs */
+    calibrateOnly: boolean;
+    /** The recorded rounds' results that --calibrate reads, each a mode's directory, such as `<round>/pilot` */
+    rounds: string[];
 }
 
 const USAGE = 'usage: eval:skill-layouts [--pilot [--layouts <list>] [--requests <list>] [--repeats <n>] | --smoke | --held-back <layout>] [--agent <kiro|copilot>] [--prepare-only | --summarise | --compare | --rescore | --reparse | --rescore-checks] --serenity-js <clone> --out <dir> [--template <dir>] [--work <dir>] [--unsandboxed]\n'
-    + '       eval:skill-layouts --check-references --serenity-js <clone> --out <dir> [--template <dir>] [--work <dir>] [--unsandboxed]';
+    + '       eval:skill-layouts --check-references --serenity-js <clone> --out <dir> [--template <dir>] [--work <dir>] [--unsandboxed]\n'
+    + '       eval:skill-layouts --calibrate --rounds <dir>,<dir> --template <dir> --out <dir> [--work <dir>]';
 
 export function parseArguments(argv: string[], cwd: string): Arguments {
     const options = new Map<string, string>();
     const flags = new Set<string>();
     for (let index = 0; index < argv.length; index++) {
         const argument = argv[index];
-        if ([ '--pilot', '--smoke', '--prepare-only', '--summarise', '--rescore', '--reparse', '--rescore-checks', '--check-references', '--compare', '--unsandboxed' ].includes(argument)) {
+        if ([ '--pilot', '--smoke', '--prepare-only', '--summarise', '--rescore', '--reparse', '--rescore-checks', '--check-references', '--compare', '--unsandboxed', '--calibrate' ].includes(argument)) {
             flags.add(argument);
         }
-        else if ([ '--serenity-js', '--template', '--out', '--work', '--held-back', '--agent', '--layouts', '--requests', '--repeats' ].includes(argument) && argv[index + 1] && ! argv[index + 1].startsWith('--')) {
+        else if ([ '--serenity-js', '--template', '--out', '--work', '--held-back', '--agent', '--layouts', '--requests', '--repeats', '--rounds' ].includes(argument) && argv[index + 1] && ! argv[index + 1].startsWith('--')) {
             options.set(argument, argv[++index]);
         }
         else if (argument !== '--') {
@@ -129,8 +142,17 @@ export function parseArguments(argv: string[], cwd: string): Arguments {
     if (checkReferencesOnly && ([ ...flags ].filter(flag => flag !== '--unsandboxed').length > 1 || heldBack !== undefined || agent !== undefined)) {
         throw new Error(USAGE);
     }
+    // it runs the judge only, on the rounds' recorded runs, so it takes no mode, agent or other action
+    const calibrateOnly = flags.has('--calibrate');
+    const rounds = listOf('--rounds', 'round');
+    if (calibrateOnly && ([ ...flags ].length > 1 || heldBack !== undefined || agent !== undefined || layouts || pilotRequests || repeatsOption !== undefined)) {
+        throw new Error(USAGE);
+    }
+    if (calibrateOnly !== (rounds !== undefined)) {
+        throw new Error(`--calibrate and --rounds <dir>,<dir> go together: the recorded rounds' results, each a mode's directory, such as <round>/pilot\n${ USAGE }`);
+    }
     const serenityJs = options.get('--serenity-js');
-    if (! serenityJs && ! summariseOnly && ! rescoreOnly && ! reparseOnly && ! compareOnly && ! rescoreChecksOnly) {
+    if (! serenityJs && ! calibrateOnly && ! summariseOnly && ! rescoreOnly && ! reparseOnly && ! compareOnly && ! rescoreChecksOnly) {
         throw new Error(`--serenity-js <clone> is required: a compiled clone of serenity-js/serenity-js on the branch with the skills\n${ USAGE }`);
     }
     const out = options.get('--out');
@@ -154,6 +176,8 @@ export function parseArguments(argv: string[], cwd: string): Arguments {
         agent: agent as Agent | undefined,
         checkReferencesOnly,
         unsandboxed: flags.has('--unsandboxed'),
+        calibrateOnly,
+        rounds: (rounds ?? []).map(round => resolve(cwd, round)),
     };
 }
 
@@ -597,11 +621,76 @@ export async function checkReferences(
     log(`all ${ checks.length } reference solutions pass, and fail with their expected values made wrong`);
 }
 
+/** What a calibration is composed of, besides the arguments: its configuration, and the dependencies it runs with. */
+export interface CalibrationSetup {
+    config: Pick<Config, 'judge' | 'runTimeoutMinutes' | 'apiServer'>;
+    env: NodeJS.ProcessEnv;
+    spawn: Spawn;
+    /** The judge's agent's version, which is part of the identity its sessions are reused by */
+    version: string;
+    protocol: CalibrationProtocol;
+    log: (message: string) => void;
+}
+
+/** The calibration of the judge `setup` configures, over the checklist, the review guide and the requests as they are. */
+export function calibrationOf(args: Pick<Arguments, 'template' | 'out' | 'work'>, { config, env, spawn, version, protocol, log: logged }: CalibrationSetup): Calibration {
+    const commands = { run, runBuffer };
+    const { requests, heldBack } = loadRequests();
+    const adapter = adapterOf(config.judge.agent);
+    return new Calibration({
+        judge: new Judge({
+            adapter,
+            model: config.judge.model,
+            homes: prepareAgentHomes(join(args.work, 'homes', 'judge'), new Work(args.work).npmCache),
+            spawn,
+            env,
+            timeoutMs: config.runTimeoutMinutes * 60_000,
+            prompt: JudgePrompt.forProject(),
+        }),
+        identity: JudgeIdentity.of(config.judge.agent, config.judge.model, version),
+        files: new CalibrationFiles(args.out),
+        guide: ReviewGuide.parse(readFileSync(REVIEW_GUIDE, 'utf8'), CHECKLIST),
+        protocol,
+        checklist: { items: CHECKLIST.map(item => item.id), exercises: (request, item) => exercises(request, item as ChecklistItem) },
+        requests: new Map([ ...requests, ...heldBack ].map(request => [ request.id, request ])),
+        projects: new ProjectBuilder(commands),
+        fixtures: new FixtureHistory(evalRoot, commands),
+        template: args.template,
+        work: args.work,
+        defaultPort: config.apiServer.port,
+        randomName: () => randomBytes(4).toString('hex'),
+        log: logged,
+    });
+}
+
+/**
+ * Judges every run the reviewer scored in the recorded rounds, three times, and compares the judge's verdicts with
+ * theirs, item by item, in <out>/calibration/calibration.md. It runs the judge's agent, so it needs its credential.
+ */
+export async function calibrateJudge(args: Arguments, { config = loadConfig(), env = process.env }: { config?: Config, env?: NodeJS.ProcessEnv } = {}): Promise<void> {
+    const adapter = adapterOf(config.judge.agent);
+    const problem = adapter.credentialProblem(env);
+    if (problem) {
+        throw new Error(`nothing judged: ${ problem }`);
+    }
+    for (const round of args.rounds) {
+        if (! existsSync(join(round, 'mapping.json'))) {
+            throw new Error(`${ round } isn't a round's results: it has no mapping.json`);
+        }
+    }
+    const calibration = calibrationOf(args, { config, env, spawn: spawnWithTimeout, version: versionOf(adapter), protocol: new CalibrationProtocol(), log });
+    await calibration.run(args.rounds);
+    log(`the judge's verdicts compared with the reviewer's: ${ new CalibrationFiles(args.out).markdown }`);
+}
+
 if (import.meta.main) {
     try {
         const args = parseArguments(process.argv.slice(2), process.cwd());
         const store = Results.of(args.out, args.mode);
-        if (args.compareOnly) {
+        if (args.calibrateOnly) {
+            await calibrateJudge(args);
+        }
+        else if (args.compareOnly) {
             store.saveCompare(compareResults(store.directory, { agent: args.agent }));
             log(`the layouts compared, request by request: ${ store.compareMarkdown }`);
         }
